@@ -97,7 +97,7 @@ class AlphaCardScraper:
         return has_printer_path and is_specific_product
 
     def extract_product_description(self, soup):
-        """Extract the detailed product description HTML"""
+        """Extract the detailed product description HTML without wrapper divs"""
         description_html = ""
         
         # Look for the specific product description div
@@ -105,13 +105,20 @@ class AlphaCardScraper:
         if desc_div:
             value_div = desc_div.find('div', class_='value')
             if value_div:
-                # Get the HTML content, preserving structure
-                description_html = str(value_div)
-                logger.info("✅ Found detailed product description")
+                # Look for the inner content div with data attributes
+                inner_div = value_div.find('div', attrs={'data-content-type': 'html'})
+                if inner_div:
+                    # Extract just the inner HTML content, not the div wrapper
+                    description_html = inner_div.decode_contents()
+                    logger.info("✅ Found detailed product description (clean)")
+                else:
+                    # Fallback: get all content inside value div but skip wrapper divs
+                    description_html = value_div.decode_contents()
+                    logger.info("✅ Found description content (fallback)")
             else:
-                # Fallback to the outer div
-                description_html = str(desc_div)
-                logger.info("✅ Found description (fallback method)")
+                # Fallback to the outer div content
+                description_html = desc_div.decode_contents()
+                logger.info("✅ Found description (outer fallback)")
         else:
             # Additional fallback selectors
             fallback_selectors = [
@@ -125,15 +132,35 @@ class AlphaCardScraper:
             for selector in fallback_selectors:
                 element = soup.select_one(selector)
                 if element:
-                    description_html = str(element)
+                    description_html = element.decode_contents()
                     logger.info(f"✅ Found description using fallback: {selector}")
                     break
             
             if not description_html:
                 logger.warning("⚠️ No detailed product description found")
         
-        # Clean up the HTML slightly (remove excessive whitespace but keep structure)
+        # Clean up the HTML and remove wrapper div artifacts
         if description_html:
+            # Remove any remaining wrapper div tags that might have been included
+            description_html = re.sub(r'<div[^>]*data-content-type="html"[^>]*>', '', description_html)
+            description_html = re.sub(r'<div[^>]*data-appearance="default"[^>]*>', '', description_html)
+            description_html = re.sub(r'<div[^>]*data-element="main"[^>]*>', '', description_html)
+            description_html = re.sub(r'<div[^>]*data-decoded="true"[^>]*>', '', description_html)
+            description_html = re.sub(r'<div[^>]*class="value"[^>]*>', '', description_html)
+            
+            # Remove closing </div> tags that are now orphaned (be careful not to remove content divs)
+            # Count opening and closing div tags to balance them
+            open_divs = len(re.findall(r'<div[^>]*>', description_html))
+            close_divs = len(re.findall(r'</div>', description_html))
+            
+            # Remove excess closing divs from the end
+            excess_closes = close_divs - open_divs
+            if excess_closes > 0:
+                # Remove the last N closing div tags
+                for _ in range(excess_closes):
+                    description_html = re.sub(r'</div>(?!.*</div>)', '', description_html, count=1)
+            
+            # Clean up whitespace
             description_html = re.sub(r'\s+', ' ', description_html)
             description_html = description_html.strip()
         
