@@ -48,15 +48,21 @@ jobs:
     - name: Check results and display summary
       run: |
         cd scraper
-        if [ -f "alphacard_printers.csv" ]; then
-          echo "✅ CSV file created successfully"
-          echo "📊 Number of lines: $(wc -l < alphacard_printers.csv)"
-          echo "📄 File size: $(ls -lh alphacard_printers.csv | awk '{print $5}')"
+        if [ -f "alphacard_printers_woocommerce.csv" ]; then
+          echo "✅ WooCommerce CSV file created successfully"
+          echo "📊 Number of lines: $(wc -l < alphacard_printers_woocommerce.csv)"
+          echo "📄 File size: $(ls -lh alphacard_printers_woocommerce.csv | awk '{print $5}')"
           
-          # Show first few lines of CSV
+          if [ -f "woocommerce_import_ready.csv" ]; then
+            echo "✅ Import-ready CSV created successfully"
+            echo "📊 Import CSV lines: $(wc -l < woocommerce_import_ready.csv)"
+            echo "📄 Import CSV size: $(ls -lh woocommerce_import_ready.csv | awk '{print $5}')"
+          fi
+          
+          # Show first few lines of main CSV
           echo ""
-          echo "📋 First 5 lines of CSV:"
-          head -5 alphacard_printers.csv
+          echo "📋 First 3 lines of WooCommerce CSV:"
+          head -3 alphacard_printers_woocommerce.csv
           
           # Show summary if available
           if [ -f "scrape_summary.json" ]; then
@@ -65,7 +71,8 @@ jobs:
             cat scrape_summary.json | python -m json.tool
           fi
         else
-          echo "❌ CSV file not found"
+          echo "❌ WooCommerce CSV file not found"
+          echo "📁 Files in directory:"
           ls -la
           exit 1
         fi
@@ -76,7 +83,8 @@ jobs:
       with:
         name: alphacard-printers-data-${{ github.run_number }}
         path: |
-          scraper/alphacard_printers.csv
+          scraper/alphacard_printers_woocommerce.csv
+          scraper/woocommerce_import_ready.csv
           scraper/alphacard_printers.json
           scraper/scrape_summary.json
         retention-days: 30
