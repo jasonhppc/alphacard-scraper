@@ -82,16 +82,65 @@ class AlphaCardScraper:
         
         # Exclude non-product URLs
         excludes = ['/blog/', '/support/', '/software/', '/supplies/', '/ribbons/', 
-                   '.pdf', '.jpg', '/compare/', '/category/']
+                   '.pdf', '.jpg', '/compare/', '/category/', '/view-all', '/manufacturer']
         if any(ex in url_lower for ex in excludes):
             return False
         
-        # Include printer URLs
+        # Include printer URLs - must contain printer path AND not be a category page
         includes = ['/id-card-printers/', '/printer/', 'card-printer']
-        return any(inc in url_lower for inc in includes)
+        has_printer_path = any(inc in url_lower for inc in includes)
+        
+        # Additional check: URL should have a specific product (not just category)
+        url_parts = url.strip('/').split('/')
+        is_specific_product = len(url_parts) >= 3 and not url_lower.endswith('printers')
+        
+        return has_printer_path and is_specific_product
+
+    def extract_product_description(self, soup):
+        """Extract the detailed product description HTML"""
+        description_html = ""
+        
+        # Look for the specific product description div
+        desc_div = soup.find('div', class_='product attribute description')
+        if desc_div:
+            value_div = desc_div.find('div', class_='value')
+            if value_div:
+                # Get the HTML content, preserving structure
+                description_html = str(value_div)
+                logger.info("✅ Found detailed product description")
+            else:
+                # Fallback to the outer div
+                description_html = str(desc_div)
+                logger.info("✅ Found description (fallback method)")
+        else:
+            # Additional fallback selectors
+            fallback_selectors = [
+                '.product-description',
+                '.description',
+                '[data-content-type="html"]',
+                '.product-info-main .description',
+                '.product-attribute-description'
+            ]
+            
+            for selector in fallback_selectors:
+                element = soup.select_one(selector)
+                if element:
+                    description_html = str(element)
+                    logger.info(f"✅ Found description using fallback: {selector}")
+                    break
+            
+            if not description_html:
+                logger.warning("⚠️ No detailed product description found")
+        
+        # Clean up the HTML slightly (remove excessive whitespace but keep structure)
+        if description_html:
+            description_html = re.sub(r'\s+', ' ', description_html)
+            description_html = description_html.strip()
+        
+        return description_html
 
     def extract_printer_data(self, url):
-        """Extract printer specifications"""
+        """Extract printer specifications including detailed description"""
         soup = self.get_page(url)
         if not soup:
             return None
@@ -102,6 +151,7 @@ class AlphaCardScraper:
             'brand': '',
             'model': '',
             'full_name': '',
+            'description': '',  # NEW: HTML description field
             'print_speed_color': '',
             'print_speed_mono': '', 
             'print_resolution': '',
@@ -134,12 +184,16 @@ class AlphaCardScraper:
             brands = {
                 'alphacard': 'AlphaCard', 'magicard': 'Magicard', 'fargo': 'Fargo',
                 'zebra': 'Zebra', 'evolis': 'Evolis', 'datacard': 'Entrust Datacard',
-                'entrust': 'Entrust Datacard', 'idp': 'IDP', 'swiftcolor': 'SwiftColor'
+                'entrust': 'Entrust Datacard', 'idp': 'IDP', 'swiftcolor': 'SwiftColor',
+                'matica': 'Matica'
             }
             for key, brand in brands.items():
                 if key in model_lower:
                     data['brand'] = brand
                     break
+            
+            # Extract detailed product description (NEW)
+            data['description'] = self.extract_product_description(soup)
             
             # Extract specifications from tables
             tables = soup.find_all('table')
@@ -152,13 +206,15 @@ class AlphaCardScraper:
                         value = cells[1].get_text(strip=True)
                         self.map_specification(key, value, data)
             
-            # Extract features from lists
+            # Extract features from lists (but avoid duplicating description content)
             features = []
             for ul in soup.find_all(['ul', 'ol']):
-                for li in ul.find_all('li'):
-                    text = li.get_text(strip=True)
-                    if 10 < len(text) < 200:
-                        features.append(text)
+                # Skip lists that are inside the product description to avoid duplication
+                if not ul.find_parent('div', class_='product attribute description'):
+                    for li in ul.find_all('li'):
+                        text = li.get_text(strip=True)
+                        if 10 < len(text) < 200:
+                            features.append(text)
             data['features'] = '; '.join(features[:10])
             
             # Extract price and speed from text
@@ -169,15 +225,44 @@ class AlphaCardScraper:
             if price_match:
                 data['price'] = price_match.group()
             
-            # Speed patterns
-            speed_match = re.search(r'(\d+)\s*cards?\s*per\s*hour', page_text, re.I)
-            if speed_match:
-                data['print_speed_color'] = f"{speed_match.group(1)} cards/hour"
+            # Speed patterns (enhanced to catch more variations)
+            speed_patterns = [
+                r'(\d+)\s*cards?\s*per\s*hour',
+                r'(\d+)\s*cph',
+                r'full\s*color.*?(\d+)\s*seconds?',
+                r'print.*?(\d+)\s*seconds?',
+                r'speed[:\s]*(\d+)'
+            ]
+            
+            for pattern in speed_patterns:
+                match = re.search(pattern, page_text, re.I)
+                if match:
+                    if 'seconds' in pattern:
+                        # Convert seconds to cards/hour estimate
+                        seconds = int(match.group(1))
+                        cards_per_hour = int(3600 / seconds) if seconds > 0 else 0
+                        data['print_speed_color'] = f"{cards_per_hour} cards/hour (estimated from {seconds}s per card)"
+                    else:
+                        data['print_speed_color'] = f"{match.group(1)} cards/hour"
+                    break
             
             # Resolution patterns  
             res_match = re.search(r'(\d+\s*x\s*\d+|\d+)\s*dpi', page_text, re.I)
             if res_match:
                 data['print_resolution'] = res_match.group()
+            
+            # Enhanced warranty detection
+            warranty_patterns = [
+                r'(\d+)\s*year\s*warranty',
+                r'warranty[:\s]*(\d+)\s*years?',
+                r'(\d+)-year\s*warranty'
+            ]
+            
+            for pattern in warranty_patterns:
+                match = re.search(pattern, page_text, re.I)
+                if match:
+                    data['warranty'] = f"{match.group(1)} years"
+                    break
                 
         except Exception as e:
             logger.error(f"Error extracting from {url}: {e}")
@@ -205,6 +290,10 @@ class AlphaCardScraper:
             data['weight'] = value
         elif 'warranty' in key_lower and not data['warranty']:
             data['warranty'] = value
+        elif ('encoding' in key_lower or 'magnetic' in key_lower) and not data['encoding_options']:
+            data['encoding_options'] = value
+        elif 'card' in key_lower and 'size' in key_lower and not data['card_sizes']:
+            data['card_sizes'] = value
 
     def scrape_all_printers(self):
         """Main scraping method"""
@@ -223,7 +312,8 @@ class AlphaCardScraper:
             
             if data:
                 self.printers_data.append(data)
-                logger.info(f"✅ {data['brand']} {data['model']}")
+                desc_preview = data['description'][:100] + "..." if data['description'] else "No description"
+                logger.info(f"✅ {data['brand']} {data['model']} | Desc: {desc_preview}")
             else:
                 logger.warning(f"❌ Failed to extract data from {url}")
                 
@@ -248,14 +338,21 @@ class AlphaCardScraper:
             json.dump(self.printers_data, f, indent=2, ensure_ascii=False)
         logger.info("💾 Saved JSON")
         
-        # Generate summary
+        # Generate enhanced summary
         summary = {
             'total_printers': len(self.printers_data),
             'scraped_at': datetime.now().isoformat(),
             'brands': {},
             'with_prices': sum(1 for p in self.printers_data if p['price']),
-            'with_speeds': sum(1 for p in self.printers_data if p['print_speed_color'])
+            'with_speeds': sum(1 for p in self.printers_data if p['print_speed_color']),
+            'with_descriptions': sum(1 for p in self.printers_data if p['description']),
+            'avg_description_length': 0
         }
+        
+        # Calculate average description length
+        desc_lengths = [len(p['description']) for p in self.printers_data if p['description']]
+        if desc_lengths:
+            summary['avg_description_length'] = int(sum(desc_lengths) / len(desc_lengths))
         
         for printer in self.printers_data:
             brand = printer['brand'] or 'Unknown'
@@ -268,6 +365,8 @@ class AlphaCardScraper:
         logger.info(f"  Total: {summary['total_printers']} printers")
         logger.info(f"  With prices: {summary['with_prices']}")
         logger.info(f"  With speeds: {summary['with_speeds']}")
+        logger.info(f"  With descriptions: {summary['with_descriptions']}")
+        logger.info(f"  Avg description length: {summary['avg_description_length']} chars")
         for brand, count in summary['brands'].items():
             logger.info(f"  {brand}: {count}")
 
@@ -280,6 +379,12 @@ def main():
         if printers:
             scraper.save_results()
             logger.info("🎯 Scraping completed successfully!")
+            
+            # Show sample of description data
+            for i, printer in enumerate(printers[:3]):
+                if printer['description']:
+                    desc_preview = printer['description'][:200] + "..." if len(printer['description']) > 200 else printer['description']
+                    logger.info(f"📄 Sample description {i+1}: {desc_preview}")
         else:
             logger.error("💥 No printers scraped!")
             exit(1)
