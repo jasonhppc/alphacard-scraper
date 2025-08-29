@@ -540,8 +540,10 @@ class WooCommerceAlphaCardScraper:
             seo_info = self.extract_seo_data(soup)
             data.update(seo_info)
             
+            # Related products
             related = self.extract_related_products(soup)
             data['related_products'] = '|'.join([p['url'] for p in related])
+            data['cross_sells'] = ''  # Can be populated later or from related products
             
             # Extract price
             page_text = soup.get_text()
@@ -596,7 +598,8 @@ class WooCommerceAlphaCardScraper:
             'brand', 'model', 'highlights',
             # Additional fields
             'url', 'scraped_date', 'price', 'backorders', 'visibility', 'featured',
-            'meta_description', 'meta_keywords', 'related_products'
+            'meta_description', 'meta_keywords', 'related_products', 'cross_sells',
+            'tax_status', 'tax_class', 'schema_data'
         ]
         
         # Add all specification columns
