@@ -1,1 +1,62 @@
+name: Scrape AlphaCard Printers
 
+on:
+  schedule:
+    # Run every day at 6 AM UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch: # Allows manual triggering
+  push:
+    branches: [ main ]
+    paths: 
+      - 'scraper/**'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests beautifulsoup4 lxml pandas
+    
+    - name: Run scraper
+      run: |
+        cd scraper
+        python alphacard_scraper.py
+    
+    - name: Check results
+      run: |
+        if [ -f "scraper/alphacard_printers.csv" ]; then
+          echo "✅ CSV file created successfully"
+          echo "📊 Number of lines: $(wc -l < scraper/alphacard_printers.csv)"
+          echo "📄 File size: $(ls -lh scraper/alphacard_printers.csv | awk '{print $5}')"
+        else
+          echo "❌ CSV file not found"
+          exit 1
+        fi
+    
+    - name: Upload CSV as artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: alphacard-printers-data-${{ github.run_number }}
+        path: |
+          scraper/alphacard_printers.csv
+          scraper/alphacard_printers.json
+          scraper/scrape_summary.json
+        retention-days: 30
+    
+    - name: Display summary
+      run: |
+        if [ -f "scraper/scrape_summary.json" ]; then
+          echo "📋 Scraping Summary:"
+          cat scraper/scrape_summary.json
+        fi
