@@ -158,11 +158,128 @@ class WooCommerceAlphaCardScraper:
             usd_amount = float(clean_price)
             aud_amount = usd_amount / usd_to_aud_rate
             aud_rounded = round(aud_amount, 2)
-            logger.info(f"💱 Converted ${usd_amount} USD → ${aud_rounded} AUD (${usd_to_aud_rate} USD = 1 AUD)")
+            logger.info(f"💱 Converted ${usd_amount} USD → ${aud_rounded} AUD")
             return str(aud_rounded)
         except (ValueError, TypeError) as e:
             logger.warning(f"⚠️ Error converting price to AUD: {e}")
             return ''
+
+    def extract_product_description(self, soup):
+        description_html = ""
+        desc_div = soup.find('div', class_='product attribute description')
+        if desc_div:
+            value_div = desc_div.find('div', class_='value')
+            if value_div:
+                inner_div = value_div.find('div', attrs={'data-content-type': 'html'})
+                if inner_div:
+                    description_html = inner_div.decode_contents()
+                    logger.info("✅ Found detailed product description")
+                else:
+                    description_html = value_div.decode_contents()
+            else:
+                description_html = desc_div.decode_contents()
+        if description_html:
+            description_html = re.sub(r'<div[^>]*data-content-type="html"[^>]*>', '', description_html)
+            description_html = re.sub(r'<div[^>]*data-appearance="default"[^>]*>', '', description_html)
+            description_html = re.sub(r'<div[^>]*data-element="main"[^>]*>', '', description_html)
+            description_html = re.sub(r'<div[^>]*data-decoded="true"[^>]*>', '', description_html)
+            description_html = re.sub(r'<div[^>]*class="value"[^>]*>', '', description_html)
+            open_divs = len(re.findall(r'<div[^>]*>', description_html))
+            close_divs = len(re.findall(r'</div>', description_html))
+            excess_closes = close_divs - open_divs
+            if excess_closes > 0:
+                for _ in range(excess_closes):
+                    description_html = re.sub(r'</div>(?!.*</div>)', '', description_html, count=1)
+            description_html = re.sub(r'\s+', ' ', description_html).strip()
+        return description_html
+
+    def extract_product_highlights(self, soup):
+        highlights_html = ""
+        highlights_div = soup.find('div', class_='product attribute highlights')
+        if highlights_div:
+            value_div = highlights_div.find('div', class_='value')
+            if value_div:
+                highlights_html = value_div.decode_contents()
+                logger.info("✅ Found product highlights")
+        if highlights_html:
+            highlights_html = re.sub(r'<div[^>]*class="value"[^>]*>', '', highlights_html)
+            highlights_html = re.sub(r'\s+', ' ', highlights_html).strip()
+        return highlights_html
+
+    def extract_specifications_table(self, soup):
+        specs = {}
+        spec_table = soup.find('table', {'id': 'product-attribute-specs-table'})
+        if not spec_table:
+            spec_table = soup.find('table', class_='additional-attributes')
+            if not spec_table:
+                spec_table = soup.find('table', class_='data table')
+        if spec_table:
+            rows = spec_table.find_all('tr')
+            logger.info(f"✅ Found specifications table with {len(rows)} rows")
+            for row in rows:
+                header = row.find('th', class_='col label')
+                data_cell = row.find('td', class_='col data')
+                if header and data_cell:
+                    key = header.get_text(strip=True)
+                    value = data_cell.get_text(strip=True)
+                    clean_key = self.clean_column_name(key)
+                    if clean_key and value:
+                        converted_value = self.convert_measurements(value)
+                        specs[clean_key] = converted_value
+                        self.all_spec_columns.add(clean_key)
+        return specs
+
+    def clean_column_name(self, name):
+        if not name:
+            return None
+        clean = re.sub(r'[^\w\s]', '', name.lower())
+        clean = re.sub(r'\s+', '_', clean.strip())
+        clean = clean.replace('_options', '').replace('_capability', '').replace('_accepted', '')
+        replacements = {
+            'weight_dimensions': 'dimensions_weight',
+            'os_compatibility': 'operating_systems', 
+            'card_sizes_accepted': 'card_sizes',
+            'card_thickness_accepted': 'card_thickness',
+            'printer_color_capability': 'color_capability',
+            'print_resolution_dpi': 'print_resolution',
+            'printing_speeds_seccard': 'print_speed_seconds',
+            'printing_capability': 'print_sides',
+            'input_hopper_capacity': 'input_capacity',
+            'output_hopper_capacity': 'output_capacity'
+        }
+        return replacements.get(clean, clean)
+
+    def extract_price_from_container(self, soup):
+        price = ''
+        price_selectors = [
+            'span[id*="product-price"] span.price',
+            'span[data-price-amount] span.price',
+            '.price-wrapper span.price',
+            '.price-box .price',
+            '.regular-price .price',
+            '.special-price .price',
+            '.price'
+        ]
+        for selector in price_selectors:
+            price_element = soup.select_one(selector)
+            if price_element:
+                price_text = price_element.get_text(strip=True)
+                price_match = re.search(r'\$?([\d,]+\.?\d*)', price_text)
+                if price_match:
+                    price = price_match.group(1).replace(',', '')
+                    logger.info(f"✅ Found price: ${price}")
+                    break
+        if not price:
+            price_container = soup.select_one('[data-price-amount]')
+            if price_container:
+                price_amount = price_container.get('data-price-amount')
+                if price_amount:
+                    try:
+                        price = str(float(price_amount))
+                        logger.info(f"✅ Found price from data attribute: ${price}")
+                    except ValueError:
+                        pass
+        return price
 
     def extract_product_images(self, soup):
         images = []
@@ -272,167 +389,83 @@ class WooCommerceAlphaCardScraper:
         slug = slug.strip('-')
         return slug
 
-    def extract_product_description(self, soup):
-        description_html = ""
-        desc_div = soup.find('div', class_='product attribute description')
-        if desc_div:
-            value_div = desc_div.find('div', class_='value')
-            if value_div:
-                inner_div = value_div.find('div', attrs={'data-content-type': 'html'})
-                if inner_div:
-                    description_html = inner_div.decode_contents()
-                    logger.info("✅ Found detailed product description (clean)")
-                else:
-                    description_html = value_div.decode_contents()
-                    logger.info("✅ Found description content (fallback)")
-            else:
-                description_html = desc_div.decode_contents()
-                logger.info("✅ Found description (outer fallback)")
-        if description_html:
-            description_html = re.sub(r'<div[^>]*data-content-type="html"[^>]*>', '', description_html)
-            description_html = re.sub(r'<div[^>]*data-appearance="default"[^>]*>', '', description_html)
-            description_html = re.sub(r'<div[^>]*data-element="main"[^>]*>', '', description_html)
-            description_html = re.sub(r'<div[^>]*data-decoded="true"[^>]*>', '', description_html)
-            description_html = re.sub(r'<div[^>]*class="value"[^>]*>', '', description_html)
-            open_divs = len(re.findall(r'<div[^>]*>', description_html))
-            close_divs = len(re.findall(r'</div>', description_html))
-            excess_closes = close_divs - open_divs
-            if excess_closes > 0:
-                for _ in range(excess_closes):
-                    description_html = re.sub(r'</div>(?!.*</div>)', '', description_html, count=1)
-            description_html = re.sub(r'\s+', ' ', description_html).strip()
-        return description_html
-
-    def extract_product_highlights(self, soup):
-        highlights_html = ""
-        highlights_div = soup.find('div', class_='product attribute highlights')
-        if highlights_div:
-            value_div = highlights_div.find('div', class_='value')
-            if value_div:
-                highlights_html = value_div.decode_contents()
-                logger.info("✅ Found product highlights")
-        if highlights_html:
-            highlights_html = re.sub(r'<div[^>]*class="value"[^>]*>', '', highlights_html)
-            highlights_html = re.sub(r'\s+', ' ', highlights_html).strip()
-        return highlights_html
-
-    def extract_specifications_table(self, soup):
-        specs = {}
-        spec_table = soup.find('table', {'id': 'product-attribute-specs-table'})
-        if not spec_table:
-            spec_table = soup.find('table', class_='additional-attributes')
-            if not spec_table:
-                spec_table = soup.find('table', class_='data table')
-        if spec_table:
-            rows = spec_table.find_all('tr')
-            logger.info(f"✅ Found specifications table with {len(rows)} rows")
-            for row in rows:
-                header = row.find('th', class_='col label')
-                data = row.find('td', class_='col data')
-                if header and data:
-                    key = header.get_text(strip=True)
-                    value = data.get_text(strip=True)
-                    clean_key = self.clean_column_name(key)
-                    if clean_key and value:
-                        converted_value = self.convert_measurements(value)
-                        specs[clean_key] = converted_value
-                        self.all_spec_columns.add(clean_key)
-        return specs
-
-    def clean_column_name(self, name):
-        if not name:
-            return None
-        clean = re.sub(r'[^\w\s]', '', name.lower())
-        clean = re.sub(r'\s+', '_', clean.strip())
-        clean = clean.replace('_options', '').replace('_capability', '').replace('_accepted', '')
-        replacements = {
-            'weight_dimensions': 'dimensions_weight',
-            'os_compatibility': 'operating_systems', 
-            'card_sizes_accepted': 'card_sizes',
-            'card_thickness_accepted': 'card_thickness',
-            'printer_color_capability': 'color_capability',
-            'print_resolution_dpi': 'print_resolution',
-            'printing_speeds_seccard': 'print_speed_seconds',
-            'printing_capability': 'print_sides',
-            'input_hopper_capacity': 'input_capacity',
-            'output_hopper_capacity': 'output_capacity'
-        }
-        return replacements.get(clean, clean)
-
-    def extract_sale_price(self, soup):
-        sale_price = ''
-        sale_selectors = ['.special-price .price', '.sale-price .price', '.discount-price .price', '.old-price + .price', '[class*="sale"] .price', '[class*="special"] .price']
-        for selector in sale_selectors:
-            sale_element = soup.select_one(selector)
-            if sale_element:
-                sale_text = sale_element.get_text(strip=True)
-                price_match = re.search(r'\$?([\d,]+\.?\d*)', sale_text)
-                if price_match:
-                    sale_price = price_match.group(1).replace(',', '')
-                    logger.info(f"✅ Found sale price: ${sale_price}")
-                    break
-        return sale_price
-
-    def extract_price_from_container(self, soup):
-        price = ''
-        price_selectors = ['span[id*="product-price"] span.price', 'span[data-price-amount] span.price', '.price-wrapper span.price', '.price-box .price', '.regular-price .price', '.special-price .price', '.price', '[class*="price"] [class*="price"]']
-        for selector in price_selectors:
-            price_element = soup.select_one(selector)
-            if price_element:
-                price_text = price_element.get_text(strip=True)
-                price_match = re.search(r'\$?([\d,]+\.?\d*)', price_text)
-                if price_match:
-                    price = price_match.group(1).replace(',', '')
-                    logger.info(f"✅ Found price: ${price} using selector: {selector}")
-                    break
-        if not price:
-            price_container = soup.select_one('[data-price-amount]')
-            if price_container:
-                price_amount = price_container.get('data-price-amount')
-                if price_amount:
-                    try:
-                        price = str(float(price_amount))
-                        logger.info(f"✅ Found price from data attribute: ${price}")
-                    except ValueError:
-                        pass
-        if not price:
-            logger.warning("⚠️ No price found in containers")
-        return price
-
     def extract_printer_data(self, url):
         soup = self.get_page(url)
         if not soup:
             return None
+        
         data = {
-            'url': url, 'scraped_date': datetime.now().isoformat(),
-            'brand': '', 'model': '', 'full_name': '', 'product_slug': '',
-            'description': '', 'short_description': '', 'highlights': '',
-            'price': '', 'regular_price': '', 'regular_price_aud': '', 'sale_price': '', 'sale_price_aud': '',
-            'stock_status': 'instock', 'stock_quantity': '', 'backorders': 'no',
-            'featured_image': '', 'gallery_images': '', 'categories': '', 'tags': '',
-            'weight': '', 'length': '', 'width': '', 'height': '',
-            'meta_description': '', 'meta_keywords': '', 'schema_data': '',
-            'related_products': '', 'cross_sells': '',
-            'product_type': 'simple', 'visibility': 'visible', 'tax_status': 'taxable', 'tax_class': '', 'manage_stock': 'yes', 'featured': 'no'
+            'url': url,
+            'scraped_date': datetime.now().isoformat(),
+            'brand': '',
+            'model': '',
+            'full_name': '',
+            'product_slug': '',
+            'description': '',
+            'short_description': '',
+            'highlights': '',
+            'price': '',
+            'regular_price': '',
+            'regular_price_aud': '',
+            'sale_price': '',
+            'sale_price_aud': '',
+            'stock_status': 'instock',
+            'stock_quantity': '',
+            'backorders': 'no',
+            'featured_image': '',
+            'gallery_images': '',
+            'categories': '',
+            'tags': '',
+            'weight': '',
+            'length': '',
+            'width': '',
+            'height': '',
+            'meta_description': '',
+            'meta_keywords': '',
+            'schema_data': '',
+            'related_products': '',
+            'cross_sells': '',
+            'product_type': 'simple',
+            'visibility': 'visible',
+            'tax_status': 'taxable',
+            'tax_class': '',
+            'manage_stock': 'yes',
+            'featured': 'no'
         }
+        
         try:
             title = soup.find('title')
             if title:
                 data['full_name'] = title.text.strip()
+                
             h1 = soup.find('h1')
             if h1:
                 data['model'] = h1.text.strip()
             elif title:
                 data['model'] = title.text.split('|')[0].strip()
+            
             model_lower = data['model'].lower()
-            brands = {'alphacard': 'AlphaCard', 'magicard': 'Magicard', 'fargo': 'Fargo', 'zebra': 'Zebra', 'evolis': 'Evolis', 'datacard': 'Entrust Datacard', 'entrust': 'Entrust Datacard', 'idp': 'IDP', 'swiftcolor': 'SwiftColor', 'matica': 'Matica'}
+            brands = {
+                'alphacard': 'AlphaCard',
+                'magicard': 'Magicard',
+                'fargo': 'Fargo',
+                'zebra': 'Zebra',
+                'evolis': 'Evolis',
+                'datacard': 'Entrust Datacard',
+                'entrust': 'Entrust Datacard',
+                'idp': 'IDP',
+                'swiftcolor': 'SwiftColor',
+                'matica': 'Matica'
+            }
             for key, brand in brands.items():
                 if key in model_lower:
                     data['brand'] = brand
                     break
+            
             data['product_slug'] = self.generate_product_slug(data['model'], data['brand'])
             data['description'] = self.extract_product_description(soup)
             data['highlights'] = self.extract_product_highlights(soup)
+            
             if data['highlights']:
                 highlight_text = BeautifulSoup(data['highlights'], 'html.parser').get_text()
                 data['short_description'] = highlight_text[:200] + '...' if len(highlight_text) > 200 else highlight_text
@@ -441,18 +474,24 @@ class WooCommerceAlphaCardScraper:
                 first_p = desc_soup.find('p')
                 if first_p:
                     data['short_description'] = first_p.get_text()[:200] + '...'
+            
             specifications = self.extract_specifications_table(soup)
             data.update(specifications)
+            
             images = self.extract_product_images(soup)
             if images:
                 data['featured_image'] = images[0]
                 data['gallery_images'] = '|'.join(images[1:])
+            
             categories = self.extract_product_categories(soup)
             data['categories'] = '|'.join(categories)
+            
             tags = self.extract_product_tags(soup, data)
             data['tags'] = '|'.join(tags)
+            
             stock_info = self.extract_stock_availability(soup)
             data.update(stock_info)
+            
             dimensions_text = specifications.get('dimensions_weight', '') or specifications.get('weight', '') or specifications.get('dimensions', '')
             if dimensions_text:
                 parsed_dims = self.parse_dimensions(dimensions_text)
@@ -460,39 +499,32 @@ class WooCommerceAlphaCardScraper:
                 data['width'] = parsed_dims['width']
                 data['height'] = parsed_dims['height']
                 data['weight'] = parsed_dims['weight']
+            
             seo_info = self.extract_seo_data(soup)
             data.update(seo_info)
+            
             related = self.extract_related_products(soup)
             data['related_products'] = '|'.join([p['url'] for p in related])
-            data['cross_sells'] = ''
+            
             price = self.extract_price_from_container(soup)
             if price:
                 data['price'] = price
                 data['regular_price'] = price
                 data['regular_price_aud'] = self.convert_usd_to_aud(price)
-            else:
-                page_text = soup.get_text()
-                price_match = re.search(r'\$[\d,]+\.?\d*', page_text)
-                if price_match:
-                    price_str = price_match.group().replace('$', '').replace(',', '')
-                    data['price'] = price_str
-                    data['regular_price'] = price_str
-                    data['regular_price_aud'] = self.convert_usd_to_aud(price_str)
-            sale_price = self.extract_sale_price(soup)
-            if sale_price:
-                data['sale_price'] = sale_price
-                data['sale_price_aud'] = self.convert_usd_to_aud(sale_price)
+            
         except Exception as e:
             logger.error(f"Error extracting from {url}: {e}")
+            
         return data if data['model'] else None
 
     def scrape_all_printers(self):
-        logger.info("🕷️ Starting WooCommerce-optimized scraper...")
+        logger.info("🕷️ Starting WooCommerce scraper...")
         printer_urls = self.find_printer_urls()
         if not printer_urls:
             logger.error("❌ No printer URLs found!")
             return []
         logger.info(f"📋 Found {len(printer_urls)} printers to scrape")
+        
         for i, url in enumerate(printer_urls, 1):
             logger.info(f"Processing {i}/{len(printer_urls)}")
             data = self.extract_printer_data(url)
@@ -500,10 +532,10 @@ class WooCommerceAlphaCardScraper:
                 self.printers_data.append(data)
                 usd_price = data.get('price', 'N/A')
                 aud_price = data.get('regular_price_aud', 'N/A')
-                images_count = len(data['gallery_images'].split('|')) if data['gallery_images'] else 0
-                logger.info(f"✅ {data['brand']} {data['model']} | USD: ${usd_price} | AUD: ${aud_price} | Images: {images_count}")
+                logger.info(f"✅ {data['brand']} {data['model']} | USD: ${usd_price} | AUD: ${aud_price}")
             else:
                 logger.warning(f"❌ Failed to extract data from {url}")
+        
         logger.info(f"🎉 Completed! Scraped {len(self.printers_data)} printers")
         return self.printers_data
 
@@ -511,15 +543,39 @@ class WooCommerceAlphaCardScraper:
         if not self.printers_data:
             logger.warning("No data to save!")
             return
-        woo_fields = ['product_type', 'product_slug', 'full_name', 'short_description', 'description', 'regular_price', 'regular_price_aud', 'sale_price', 'sale_price_aud', 'stock_status', 'stock_quantity', 'manage_stock', 'categories', 'tags', 'featured_image', 'gallery_images', 'weight', 'length', 'width', 'height', 'brand', 'model', 'highlights', 'url', 'scraped_date', 'price', 'backorders', 'visibility', 'featured', 'meta_description', 'meta_keywords', 'related_products', 'cross_sells', 'tax_status', 'tax_class', 'schema_data']
+        
+        woo_fields = [
+            'product_type', 'product_slug', 'full_name', 'short_description', 'description',
+            'regular_price', 'regular_price_aud', 'sale_price', 'sale_price_aud', 
+            'stock_status', 'stock_quantity', 'manage_stock',
+            'categories', 'tags', 'featured_image', 'gallery_images',
+            'weight', 'length', 'width', 'height',
+            'brand', 'model', 'highlights',
+            'url', 'scraped_date', 'price', 'backorders', 'visibility', 'featured',
+            'meta_description', 'meta_keywords', 'related_products', 'cross_sells',
+            'tax_status', 'tax_class', 'schema_data'
+        ]
+        
         spec_fields = sorted(list(self.all_spec_columns))
         all_fields = woo_fields + spec_fields
+        
         for record in self.printers_data:
             for field in all_fields:
                 if field not in record:
                     record[field] = ''
+        
         with open('alphacard_printers_woocommerce.csv', 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=all_fields)
+            writer.writeheader()
+            writer.writerows(self.printers_data)
+        logger.info(f"💾 Saved WooCommerce CSV: {len(self.printers_data)} printers")
+        
+        woo_import_fields = [
+            'product_type', 'product_slug', 'full_name', 'short_description', 'description',
+            'regular_price', 'regular_price_aud', 'stock_status', 'categories', 'tags', 
+            'featured_image', 'gallery_images', 'weight', 'length', 'width', 'height'
+        ]
+        
         with open('woocommerce_import_ready.csv', 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=woo_import_fields)
             writer.writeheader()
@@ -540,17 +596,8 @@ class WooCommerceAlphaCardScraper:
             'with_aud_prices': sum(1 for p in self.printers_data if p.get('regular_price_aud')),
             'with_images': sum(1 for p in self.printers_data if p.get('featured_image')),
             'with_descriptions': sum(1 for p in self.printers_data if p.get('description')),
-            'with_highlights': sum(1 for p in self.printers_data if p.get('highlights')),
-            'with_categories': sum(1 for p in self.printers_data if p.get('categories')),
-            'avg_images_per_product': 0,
-            'price_range_usd': {'min': 0, 'max': 0, 'avg': 0},
-            'price_range_aud': {'min': 0, 'max': 0, 'avg': 0}
+            'with_highlights': sum(1 for p in self.printers_data if p.get('highlights'))
         }
-        
-        total_images = sum(len(p.get('gallery_images', '').split('|')) + (1 if p.get('featured_image') else 0) 
-                          for p in self.printers_data)
-        if self.printers_data:
-            summary['avg_images_per_product'] = round(total_images / len(self.printers_data), 1)
         
         usd_prices = [float(p.get('price', 0)) for p in self.printers_data if p.get('price') and str(p.get('price')).replace('.', '').replace(',', '').isdigit()]
         aud_prices = [float(p.get('regular_price_aud', 0)) for p in self.printers_data if p.get('regular_price_aud') and str(p.get('regular_price_aud')).replace('.', '').replace(',', '').isdigit()]
@@ -576,12 +623,7 @@ class WooCommerceAlphaCardScraper:
         logger.info(f"  Total products: {summary['total_printers']}")
         logger.info(f"  With USD prices: {summary['with_usd_prices']}")
         logger.info(f"  With AUD prices: {summary['with_aud_prices']}")
-        if summary['price_range_usd']['max'] > 0:
-            logger.info(f"  USD price range: ${summary['price_range_usd']['min']}-${summary['price_range_usd']['max']} (avg: ${summary['price_range_usd']['avg']})")
-        if summary['price_range_aud']['max'] > 0:
-            logger.info(f"  AUD price range: ${summary['price_range_aud']['min']}-${summary['price_range_aud']['max']} (avg: ${summary['price_range_aud']['avg']})")
         logger.info(f"  With images: {summary['with_images']}")
-        logger.info(f"  Avg images per product: {summary['avg_images_per_product']}")
         logger.info(f"  Currency conversion: $0.62 USD = $1.00 AUD")
         logger.info(f"  Ready for WooCommerce import: ✅")
 
@@ -604,9 +646,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-            writer.writerows(self.printers_data)
-        logger.info(f"💾 Saved WooCommerce CSV: {len(self.printers_data)} printers")
-        woo_import_fields = ['product_type', 'product_slug', 'full_name', 'short_description', 'description', 'regular_price', 'regular_price_aud', 'stock_status', 'categories', 'tags', 'featured_image', 'gallery_images', 'weight', 'length', 'width', 'height']
-        with open('woocommerce_import_ready.csv', 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=woo_import_fields)
-            writer.writeheader()
